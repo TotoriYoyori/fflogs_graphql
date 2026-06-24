@@ -1,11 +1,13 @@
 from abc import ABC, abstractmethod
-from typing import ClassVar
+from typing import ClassVar, Any
+from datetime import datetime
 
 from pydantic import (
     BaseModel, 
     ConfigDict,
     field_validator,
-    model_serializer
+    model_serializer,
+    model_validator
 )
 
 from pyspark.sql import DataFrame, Column
@@ -39,14 +41,42 @@ class GraphQLQuery(BaseModel):
         populate_by_name=True,  
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_time_fields(cls, data: Any) -> Any:
+        """Normalizes any field ending in `_time` to a UNIX timestamp in milliseconds. 
+        
+        Accepts either a numeric UNIX ms timestamp (passed through
+        unchanged) or a local-time string in 'YYYY-MM-DD HH:MM:SS' format,
+        converted using the system's local timezone.
+        """
+        for key, value in list(data.items()):
+            if not key.endswith("_time"):
+                continue
+
+            if isinstance(value, str):
+                try:
+                    dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+                except ValueError as e:
+                    raise ValueError(
+                        f"Invalid datetime string '{value}'. "
+                        "Expected format: 'YYYY-MM-DD HH:MM:SS'."
+                    ) from e
+                data[key] = dt.timestamp() * 1000
+            elif isinstance(value, (int, float)):
+                data[key] = float(value)
+
+        return data
+
     @model_serializer
     def serialize(self) -> dict:
         return {
             "query": self.QUERY,
             "variables": {
-                field: getattr(self, field) 
+                field: getattr(self, field)
                 for field in self.model_fields
-            }
+                if getattr(self, field) is not None
+            },
         }
 
 # =============== Shared settings for all Bronze, Silver, and Gold shaped tables ==============
@@ -171,3 +201,11 @@ class GoldTable(ABC):
 
     @abstractmethod
     def define(self) -> "GoldTable": ...
+
+
+class AnalysisQueryParameters(BaseModel):
+    """Custom base class for an analysis query and its required parameters."""
+
+    model_config = ConfigDict(
+        frozen=True
+    )
